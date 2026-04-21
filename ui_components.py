@@ -16,29 +16,24 @@ def show_login():
     st.markdown("<h1 style='text-align: center;'>🔐 Shoptoplus 系統登入</h1>", unsafe_allow_html=True)
     col1, col2, col3 = st.columns([1, 1, 1])
     with col2:
-        user_input = st.text_input("用戶名稱 (Name)").strip().upper()
-        pass_input = st.text_input("密碼 (Password)", type="password").strip()
-        if st.button("登入", use_container_width=True):
-            if pass_input == f"{user_input.lower()}9152":
-                _handle_login_success(user_input)
+        user_input = st.text_input("用戶名稱 (Name)", key="login_username").strip().upper()
+        pass_input = st.text_input("密碼 (Password)", type="password", key="login_password").strip()
+        
+        if st.button("登入", use_container_width=True, key="login_button"):
+            if not user_input:
+                st.error("❌ 請輸入用戶名稱")
+            elif not pass_input:
+                st.error("❌ 請輸入密碼")
             else:
-                st.error("❌ 密碼錯誤！")
-
-def _handle_login_success(username):
-    if username in CONFIG["ROLES"]["ADMIN"]:
-        st.session_state.role = "Admin"
-    elif username in CONFIG["ROLES"]["ACC"]:
-        st.session_state.role = "Acc"
-    elif username in CONFIG["ROLES"]["STAFF_3F"] or username in CONFIG["ROLES"]["STAFF_5F"]:
-        st.session_state.role = "Staff"
-    else:
-        st.error("❌ 無效的用戶名稱")
-        return
-    
-    st.session_state.logged_in = True
-    st.session_state.username = username
-    write_audit_log(username, "用戶登入", "N/A")
-    st.rerun()
+                success, result = db.verify_user(user_input, pass_input)
+                if success:
+                    st.session_state.role = result
+                    st.session_state.logged_in = True
+                    st.session_state.username = user_input.upper()
+                    write_audit_log(user_input, "用戶登入", "N/A")
+                    st.rerun()
+                else:
+                    st.error(f"❌ 登入失敗：{result}")
 
 # --- 2. 側邊欄組件 (V70 核心結構) ---
 
@@ -77,6 +72,31 @@ def render_sidebar_controls():
     
     return current_batch
 
+def render_user_management():
+    """用戶管理功能（所有用戶只能修改自己的密碼）"""
+    with st.expander("🔑 修改我的密碼", expanded=False):
+        current_username = st.session_state.username
+        st.caption(f"當前用戶：{current_username}")
+        
+        new_pwd = st.text_input("新密碼", type="password", key="new_pwd").strip()
+        confirm_pwd = st.text_input("確認新密碼", type="password", key="confirm_pwd").strip()
+        
+        if st.button("更新密碼", use_container_width=True, key="update_pwd_btn"):
+            if new_pwd and confirm_pwd:
+                if new_pwd == confirm_pwd:
+                    success, msg = db.update_user_password(current_username, new_pwd)
+                    if success:
+                        st.success(msg)
+                        st.info("✅ 密碼已更新，請使用新密碼重新登入")
+                        st.session_state.logged_in = False
+                        st.rerun()
+                    else:
+                        st.error(msg)
+                else:
+                    st.error("兩次輸入的密碼不一致")
+            else:
+                st.error("請填寫密碼")
+
 # --- 3. 入庫作業分頁 ---
 
 def show_work_tab(current_batch):
@@ -85,11 +105,9 @@ def show_work_tab(current_batch):
     is_locked = batch_info["status"] == "completed" if batch_info else False
     task_df = db.get_products_by_batch(current_batch)
     
-    # 1. 人員記錄區
     worker1, worker2 = _render_worker_info(task_df, is_locked)
     st.divider()
 
-    # 2. 佈局判斷
     ui_mode = st.session_state.get('ui_mode', "電腦模式")
     
     if ui_mode == "電腦模式":
@@ -103,7 +121,6 @@ def show_work_tab(current_batch):
         st.divider()
         _render_inventory_list(current_batch, task_df, is_locked)
 
-    # 3. 結案按鈕
     if not is_locked and st.session_state.role in ["Admin", "Staff"]:
         st.divider()
         if st.button("✅ 正式完成入庫並鎖定", type="primary", use_container_width=True):
@@ -113,7 +130,6 @@ def show_work_tab(current_batch):
                 st.rerun()
 
 def _render_worker_info(task_df, is_locked):
-    """實際作業人員記錄"""
     st.markdown("### 👷 實際作業人員記錄")
     w_col1, w_col2 = st.columns(2)
     first_p = task_df.iloc[0] if not task_df.empty else None
@@ -124,13 +140,11 @@ def _render_worker_info(task_df, is_locked):
     return w1, w2
 
 def _render_work_core(current_batch, task_df, is_locked, worker1, worker2):
-    """掃描作業核心區域"""
     if 'last_signal' in st.session_state:
         st.markdown(st.session_state.last_signal, unsafe_allow_html=True)
     _render_scan_section(current_batch, task_df, is_locked, worker1, worker2)
 
 def _render_scan_section(current_batch, task_df, is_locked, worker1, worker2):
-    """掃描產品區域"""
     def on_scan():
         st.session_state.active_barcode = st.session_state.barcode_scan_input
         st.session_state.barcode_scan_input = ""
@@ -154,7 +168,6 @@ def _render_scan_section(current_batch, task_df, is_locked, worker1, worker2):
         _render_input_form(current_batch, scan_code, base_item, sku_records, task_df, worker1, worker2)
 
 def _render_product_status_card(base_item, sku_records):
-    """產品狀態卡片 (黑色背景)"""
     val_exp = pd.to_numeric(base_item['expected_qty'], errors='coerce')
     expected_num = 0 if pd.isna(val_exp) else val_exp
     current_total = pd.to_numeric(sku_records['actual_qty'], errors='coerce').sum()
@@ -171,7 +184,6 @@ def _render_product_status_card(base_item, sku_records):
     """, unsafe_allow_html=True)
 
 def _render_input_form(current_batch, scan_code, base_item, sku_records, task_df, worker1, worker2):
-    """輸入表單"""
     with st.form("input_form", clear_on_submit=True):
         new_qty = st.text_input("1. 入庫數量", value=str(int(float(base_item['expected_qty'] or 0))))
         new_bbd = st.text_input("2. 到期日期 (YYYY-MM-DD)", value=base_item.get('expiry_date', ''))
@@ -191,7 +203,6 @@ def _render_input_form(current_batch, scan_code, base_item, sku_records, task_df
                 play_audio(sound)
 
 def _render_inventory_list(current_batch, task_df, is_locked):
-    """入庫清單表格"""
     st.subheader("📋 入庫清單")
     if task_df.empty:
         st.info("尚無資料")
@@ -205,7 +216,6 @@ def _render_inventory_list(current_batch, task_df, is_locked):
 # --- 4. 數據報表分頁 ---
 
 def show_report_tab(current_batch):
-    """數據報表分頁"""
     df = db.get_products_by_batch(current_batch)
     st.markdown(f"### 📊 {current_batch} 數據統計")
     st.dataframe(df, use_container_width=True)
@@ -223,7 +233,6 @@ def show_report_tab(current_batch):
                                file_name=reports["std"]["filename"], use_container_width=True)
 
 def add_auto_focus():
-    """自動回焦功能"""
     components.html("""<script>
         function smartFocus() {
             const activeEl = window.parent.document.activeElement;

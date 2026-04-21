@@ -5,12 +5,19 @@ from ui_components import render_sidebar_controls, show_work_tab, show_report_ta
 def show_warehouse_tab():
     """
     倉庫端 V70 核心功能
-    側邊欄顯示：建立新任務、選擇作業批次
+    側邊欄顯示：建立新任務、選擇作業批次、登出系統
     主頁面顯示：入庫作業、數據報表
     """
     # 1. 在側邊欄渲染控制項（建立新任務、選擇批次）
     with st.sidebar:
         current_batch = render_sidebar_controls()
+        
+        st.divider()
+        
+        # 登出按鈕（放在選擇作業批次之下）
+        if st.button("🚪 登出系統", use_container_width=True, key="warehouse_logout"):
+            st.session_state.logged_in = False
+            st.rerun()
     
     # 2. 主頁面內容
     if current_batch == "請選擇":

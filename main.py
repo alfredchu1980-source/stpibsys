@@ -33,35 +33,44 @@ if 'ui_mode' not in st.session_state: st.session_state.ui_mode = "電腦模式"
 if not st.session_state.logged_in:
     show_login()
 else:
-    # 5. 側邊欄導航
+    # 5. 側邊欄導航（通用部分）
     with st.sidebar:
         st.title(f"🏢 {CONFIG['SYSTEM_NAME']}")
         st.caption(CONFIG["VERSION"])
         st.success(f"👤 登入：{st.session_state.username}")
+        
+        st.divider()
+        
+        # 功能菜單（根據權限顯示不同選項）
+        user_role = st.session_state.role
+        
+        if user_role == "Admin":
+            pending_count = db.get_pending_count()
+            badge = f"🔴 {pending_count}" if pending_count > 0 else ""
+            menu = st.radio("功能菜單", [
+                "📦 倉庫端 (V70 核心)", 
+                f"📩 客戶端預報 {badge}", 
+                "🖥️ Office 管理", 
+                "📺 電視看板"
+            ], label_visibility="collapsed")
+        else:
+            menu = st.radio("功能菜單", [
+                "📦 倉庫端 (V70 核心)"
+            ], label_visibility="collapsed")
+        
+        st.divider()
         
         # 佈局切換按鈕
         st.session_state.ui_mode = st.radio("🖥️ 介面佈局", ["電腦模式", "手機模式"], index=0 if st.session_state.ui_mode == "電腦模式" else 1)
         
         st.divider()
         
-        # 功能菜單
-        pending_count = db.get_pending_count()
-        badge = f"🔴 {pending_count}" if pending_count > 0 else ""
-        
-        menu = st.radio("功能菜單", [
-            "📦 倉庫端 (V70 核心)", 
-            f"📩 客戶端預報 {badge}", 
-            "🖥️ Office 管理", 
-            "📺 電視看板"
-        ], label_visibility="collapsed")
-        
-        st.divider()
-        
-        if st.button("🚪 登出系統", use_container_width=True):
-            st.session_state.logged_in = False
-            st.rerun()
+        # 修改密碼（所有用戶都可以修改自己的密碼）
+        from ui_components import render_user_management
+        render_user_management()
 
     # 6. 執行對應模組
+    # 注意：warehouse_v70.py 會在自己的 st.sidebar 區塊中處理登出按鈕
     if menu == "📦 倉庫端 (V70 核心)":
         show_warehouse_tab()
     elif menu == f"📩 客戶端預報 {badge}":
