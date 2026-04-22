@@ -168,6 +168,14 @@ def create_user(username, password, role):
         hashed_password = _hash_password(password)
         if not hashed_password:
             return False, "密碼處理失敗"
+        # 確保角色名稱正確（首字母大寫）
+        role = role.strip().capitalize()
+        if role.lower() == "admin":
+            role = "Admin"
+        elif role.lower() == "staff":
+            role = "Staff"
+        elif role.lower() == "customer":
+            role = "Customer"
         data = {
             "username": username.upper(),
             "password_hash": hashed_password,
@@ -200,15 +208,47 @@ def update_user_password(username, new_password):
 
 def verify_user(username, password):
     try:
+        # 先嘗試大寫搜尋
         res = supabase.table("users").select("*").eq("username", username.upper()).execute()
+        
+        # 如果找不到，嘗試小寫搜尋（兼容直接在 Supabase 創建的用戶）
+        if not res.data:
+            res = supabase.table("users").select("*").eq("username", username.lower()).execute()
+        
+        # 如果還是找不到，嘗試原始輸入搜尋
+        if not res.data:
+            res = supabase.table("users").select("*").eq("username", username).execute()
+        
         if not res.data:
             return False, "用戶不存在"
+        
         user = res.data[0]
-        stored_hash = user.get("password_hash", "")
+        # 兼容兩種欄位名稱：password_hash 或 password
+        stored_hash = user.get("password_hash", "") or user.get("password", "")
+        
+        # 確保角色名稱正確（首字母大寫）
         user_role = user.get("role", "Staff")
-        if _verify_password(password, stored_hash):
-            return True, user_role
+        if user_role:
+            user_role = user_role.strip().capitalize()
+            if user_role.lower() == "admin":
+                user_role = "Admin"
+            elif user_role.lower() == "staff":
+                user_role = "Staff"
+            elif user_role.lower() == "customer":
+                user_role = "Customer"
+        
+        # 檢查密碼是否為雜湊值
+        if stored_hash.startswith('$2b$') or stored_hash.startswith('$2a$'):
+            # 是雜湊值，使用 bcrypt 驗證
+            if _verify_password(password, stored_hash):
+                return True, user_role
+            else:
+                return False, "密碼錯誤"
         else:
-            return False, "密碼錯誤"
+            # 是明文密碼（直接在 Supabase 創建的情況）
+            if stored_hash == password:
+                return True, user_role
+            else:
+                return False, "密碼錯誤"
     except Exception as e:
         return False, f"驗證失敗：{str(e)}"
