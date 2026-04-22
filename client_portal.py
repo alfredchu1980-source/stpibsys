@@ -1,117 +1,79 @@
+# client_portal.py
 import streamlit as st
 import pandas as pd
 from datetime import datetime
-import io
 from config import CONFIG
 import database as db
-import services # 引入 services 以使用日期校驗
-
-def generate_template_excel():
-    """生成包含標準標題行的 Excel 範本"""
-    output = io.BytesIO()
-    headers = CONFIG["EXCEL_TEMPLATE"]["REQUIRED_HEADERS"]
-    # 建立一個空的 DataFrame，只包含標題
-    df = pd.DataFrame(columns=headers)
-    # 加入一行範例數據
-    example_row = {
-        "SKU_ID": "SKU001",
-        "BARCODE": "4891234567890",
-        "PRODUCT_NAME": "範例產品 A",
-        "EXPECTED_QTY": 100,
-        "EXPIRY_DATE": "2026-12-31"
-    }
-    df = pd.concat([df, pd.DataFrame([example_row])], ignore_index=True)
-    
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        df.to_excel(writer, index=False, sheet_name='Template')
-        # 可以在這裡加入一些格式化，讓標題更明顯
-        workbook = writer.book
-        worksheet = writer.sheets['Template']
-        header_format = workbook.add_format({'bold': True, 'bg_color': '#D9D9D9', 'border': 1})
-        for col_num, value in enumerate(df.columns.values):
-            worksheet.write(0, col_num, value, header_format)
-            worksheet.set_column(col_num, col_num, 20)
-            
-    return output.getvalue()
+from utils import write_audit_log
+import services
 
 def show_client_portal():
-    st.title("📦 客戶自助入庫預報")
-    st.info("請下載標準範本填寫後上傳。")
+    """客戶端預報頁面 - 溫度選擇按鈕固定在底部"""
+    st.title("📩 客戶端預報")
     
-    # 1. 下載範本按鈕 (生成真實的 Excel 檔案)
-    template_data = generate_template_excel()
-    st.download_button(
-        label="📥 下載標準入庫範本.xlsx",
-        data=template_data,
-        file_name="Inbound_Template.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    pending_count = db.get_pending_count()
+    if pending_count > 0:
+        st.warning(f"🔴 您有 {pending_count} 筆待審核的預報")
+    
+    st.markdown("### 📝 建立新預報")
+    
+    cust_name = st.text_input("🏢 客戶名稱", key="client_cust_name").strip().upper()
+    new_batch_id = st.text_input("新任務編號", placeholder="例如：JOB-001", key="client_batch_id").strip()
+    
+    # 溫度類型選擇（決定樓層）
+    temp_type = st.radio(
+        "🌡️ 儲存溫度類型",
+        ["Ambient (常溫)", "Chilled or Frozen (冷凍或冷藏)"],
+        key="client_temp_type",
+        help="常溫→5F, 冷凍/冷藏→3F",
+        horizontal=True
     )
+    
+    # 根據溫度類型自動分配樓層
+    if "Ambient" in temp_type:
+        batch_floor = "5F"
+        st.info("📍 將分配至 **5F**（常溫倉）☀️")
+    else:
+        batch_floor = "3F"
+        st.info("📍 將分配至 **3F**（冷凍/冷藏倉）🌡️")
+    
+    uploaded_file = st.file_uploader("上傳 Excel", type=["xlsx"], key="client_uploader")
+    
+    # 提交按鈕固定在頁面底部
+    st.divider()
+    st.markdown("<div style='height: 100px;'></div>", unsafe_allow_html=True)  # 間距
+    
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        submit_btn = st.button("📤 提交預報", use_container_width=True, type="primary", key="client_submit_btn")
+    with col2:
+        reset_btn = st.button("🔄 重置表單", use_container_width=True, key="client_reset_btn")
+    
+    if reset_btn:
+        st.rerun()
+    
+    if submit_btn:
+        if not new_batch_id:
+            st.error("❌ 請輸入任務編號")
+        elif not uploaded_file:
+            st.error("❌ 請上傳 Excel 檔案")
+        else:
+            success, msg = services.process_excel_upload(uploaded_file, new_batch_id, cust_name, batch_floor, "")
+            if success:
+                db.create_batch(new_batch_id, cust_name, status="pending", source="Client", floor=batch_floor)
+                st.success(f"✅ 預報提交成功！等待 Office 審核。（樓層：{batch_floor}）")
+                write_audit_log(st.session_state.username, f"提交預報：{new_batch_id}", f"Client, Floor: {batch_floor}")
+                st.rerun()
+            else:
+                st.error(f"❌ 提交失敗：{msg}")
     
     st.divider()
     
-    # 2. 客戶填寫基本資料
-    cust_name = st.text_input("🏢 客戶名稱")
-    uploaded_file = st.file_uploader("📤 上傳預報 Excel", type=["xlsx"])
-    
-    if uploaded_file and cust_name:
-        try:
-            df = pd.read_excel(uploaded_file).fillna('')
-            
-            # --- 嚴格校驗邏輯 ---
-            # A. 標題行檢查
-            required = CONFIG["EXCEL_TEMPLATE"]["REQUIRED_HEADERS"]
-            current_headers = [str(h).upper() for h in df.columns]
-            missing = [h for h in required if h not in current_headers]
-            
-            if missing:
-                st.error(f"❌ 格式錯誤：找不到欄位 {missing}，請使用標準範本。")
-                return
-
-            # B. 必填項檢查 (SKU_ID, BARCODE, EXPECTED_QTY)
-            if df['SKU_ID'].astype(str).str.strip().eq('').any() or \
-               df['BARCODE'].astype(str).str.strip().eq('').any() or \
-               df['EXPECTED_QTY'].astype(str).str.strip().eq('').any():
-                st.error("❌ 必填項檢查失敗：SKU_ID, BARCODE, EXPECTED_QTY 不能為空。")
-                return
-
-            # C. 數據格式檢查 (數量必須是數字)
-            if not pd.to_numeric(df['EXPECTED_QTY'], errors='coerce').notnull().all():
-                st.error("❌ 數據格式錯誤：'EXPECTED_QTY' 欄位只能填寫數字。")
-                return
-
-            # D. 嚴格到期日校驗 (Excel 每一行)
-            for i, row in df.iterrows():
-                bbd_val = str(row['EXPIRY_DATE']).strip()
-                is_valid, err_msg = services.is_valid_expiry_date(bbd_val)
-                if not is_valid:
-                    st.error(f"❌ 第 {i+2} 行到期日錯誤: {err_msg}")
-                    return
-
-            # E. 重複條碼檢查
-            duplicates = df[df.duplicated(['BARCODE'], keep=False)]
-            if not duplicates.empty:
-                st.warning("⚠️ 發現重複條碼，請確認是否正確？")
-                st.dataframe(duplicates)
-                if not st.button("✅ 確認無誤，繼續提交"):
-                    return
-
-            # --- 寫入緩衝區 ---
-            if st.button("🚀 提交入庫申請"):
-                batch_id = f"REQ{datetime.now().strftime('%Y%m%d%H%M%S')}"
-                
-                # 寫入 batches 表 (狀態為 Client_Submitted)
-                if db.create_batch(batch_id, cust_name, status=CONFIG["STATUS"]["CLIENT_SUBMITTED"], source="Client"):
-                    # 寫入 products 表
-                    for i, row in df.iterrows():
-                        product_data = (
-                            batch_id, str(i+1), str(row['BARCODE']), str(row['SKU_ID']), 
-                            str(row['PRODUCT_NAME']), str(row['EXPECTED_QTY']), "", "", 
-                            str(row['EXPIRY_DATE']), "", "", "", ""
-                        )
-                        db.insert_product(product_data)
-                    
-                    st.success(f"✅ 提交成功！您的申請編號為：{batch_id}")
-                    st.balloons()
-                
-        except Exception as e:
-            st.error(f"❌ 處理失敗: {str(e)}")
+    st.markdown("### 📋 我的預報記錄")
+    all_batches = db.get_batches_by_status(["pending", "Active", "completed"])
+    if all_batches.empty:
+        st.info("尚無預報記錄")
+    else:
+        display_df = all_batches[['batch_id', 'customer_name', 'status', 'floor', 'created_at']].copy()
+        display_df.columns = ['任務編號', '客戶名稱', '狀態', '樓層', '建立時間']
+        st.dataframe(display_df, use_container_width=True)

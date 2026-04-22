@@ -4,6 +4,7 @@ from supabase import create_client, Client
 from datetime import datetime
 import pandas as pd
 from config import CONFIG
+import bcrypt
 
 def get_supabase_client() -> Client:
     try:
@@ -33,8 +34,8 @@ def get_batch_info(batch_id):
     res = supabase.table("batches").select("*").eq("batch_id", batch_id).execute()
     return res.data[0] if res.data else None
 
-def create_batch(batch_id, customer_name, status='pending', source='Office'):
-    data = {"batch_id": batch_id, "customer_name": customer_name, "status": status, "source": source, "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+def create_batch(batch_id, customer_name, status='pending', source='Office', floor='3F'):
+    data = {"batch_id": batch_id, "customer_name": customer_name, "status": status, "source": source, "floor": floor, "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
     try:
         supabase.table("batches").upsert(data).execute()
         return True
@@ -81,10 +82,8 @@ def insert_product(data_tuple):
     }
     try:
         response = supabase.table("products").insert(data).execute()
-        st.success("Write successful!")
         return True
     except Exception as e:
-        st.error(f"Insert failed: {str(e)}")
         try:
             update_data = {
                 "actual_qty": str(data_tuple[6]) if data_tuple[6] else "",
@@ -95,10 +94,8 @@ def insert_product(data_tuple):
                 "updated_at": data_tuple[11]
             }
             supabase.table("products").update(update_data).eq("batch_id", data_tuple[0]).eq("seq", data_tuple[1]).execute()
-            st.success("Update successful!")
             return True
         except Exception as e2:
-            st.error(f"Update failed: {str(e2)}")
             return False
 
 def update_product_qty(batch_id, seq, qty, w1, w2):
@@ -107,25 +104,10 @@ def update_product_qty(batch_id, seq, qty, w1, w2):
         supabase.table("products").update(data).eq("batch_id", batch_id).eq("seq", seq).execute()
         return True
     except Exception as e:
-        st.error(f"Update qty failed: {str(e)}")
-        return False
-
-def reset_product_record(batch_id, seq):
-    try:
-        supabase.table("products").update({"actual_qty": "", "location": "", "expiry_date": "", "updated_at": ""}).eq("batch_id", batch_id).eq("seq", seq).execute()
-        return True
-    except:
-        return False
-
-def delete_product_record(batch_id, seq):
-    try:
-        supabase.table("products").delete().eq("batch_id", batch_id).eq("seq", seq).execute()
-        return True
-    except:
         return False
 
 def get_pending_count():
-    res = supabase.table("batches").select("batch_id", count="exact").eq("status", CONFIG["STATUS"]["CLIENT_SUBMITTED"]).execute()
+    res = supabase.table("batches").select("batch_id", count="exact").eq("status", "pending").execute()
     return res.count if res.count is not None else 0
 
 def get_batches_by_status(status_list):
@@ -136,23 +118,59 @@ def get_batches_by_status(status_list):
         st.error(f"Get batches by status failed: {str(e)}")
         return pd.DataFrame()
 
-# ========== 用戶管理功能 ==========
+def get_batches_by_floor(floor):
+    """根據樓層獲取批次"""
+    try:
+        res = supabase.table("batches").select("*").eq("floor", floor).in_("status", ["Active", "pending"]).order("created_at", desc=True).execute()
+        return [r["batch_id"] for r in res.data]
+    except:
+        return []
+
+def _hash_password(password):
+    try:
+        salt = bcrypt.gensalt(rounds=12)
+        hashed = bcrypt.hashpw(password.encode('utf-8'), salt)
+        return hashed.decode('utf-8')
+    except:
+        return None
+
+def _verify_password(password, hashed_password):
+    try:
+        if not hashed_password:
+            return False
+        if hashed_password.startswith('$2b$') or hashed_password.startswith('$2a$'):
+            return bcrypt.checkpw(password.encode('utf-8'), hashed_password.encode('utf-8'))
+        else:
+            return hashed_password == password
+    except:
+        return False
 
 def get_all_users():
-    """獲取所有用戶列表"""
     try:
         res = supabase.table("users").select("*").order("username").execute()
         return pd.DataFrame(res.data) if res.data else pd.DataFrame()
-    except Exception as e:
-        st.error(f"Get users failed: {str(e)}")
+    except:
         return pd.DataFrame()
 
-def create_user(username, password, role):
-    """建立新用戶"""
+def user_exists(username):
     try:
+        res = supabase.table("users").select("username").eq("username", username.upper()).execute()
+        return len(res.data) > 0
+    except:
+        return False
+
+def create_user(username, password, role):
+    try:
+        if user_exists(username):
+            return False, f"用戶名稱 {username.upper()} 已存在"
+        if len(password) < 6:
+            return False, "密碼長度必須至少 6 個字元"
+        hashed_password = _hash_password(password)
+        if not hashed_password:
+            return False, "密碼處理失敗"
         data = {
             "username": username.upper(),
-            "password_hash": password,
+            "password_hash": hashed_password,
             "role": role,
             "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -160,50 +178,37 @@ def create_user(username, password, role):
         supabase.table("users").insert(data).execute()
         return True, "用戶建立成功！"
     except Exception as e:
+        if "duplicate" in str(e).lower():
+            return False, f"用戶名稱 {username.upper()} 已存在"
         return False, f"建立失敗：{str(e)}"
 
 def update_user_password(username, new_password):
-    """更新用戶密碼（只能修改自己的密碼）"""
     try:
+        if len(new_password) < 6:
+            return False, "密碼長度必須至少 6 個字元"
+        hashed_password = _hash_password(new_password)
+        if not hashed_password:
+            return False, "密碼處理失敗"
         data = {
-            "password_hash": new_password,
+            "password_hash": hashed_password,
             "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }
         supabase.table("users").update(data).eq("username", username.upper()).execute()
         return True, "密碼更新成功！"
-    except Exception as e:
-        return False, f"更新失敗：{str(e)}"
-
-def update_user_role(username, new_role):
-    """更新用戶角色"""
-    try:
-        data = {
-            "role": new_role,
-            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        }
-        supabase.table("users").update(data).eq("username", username.upper()).execute()
-        return True, "角色更新成功！"
-    except Exception as e:
-        return False, f"更新失敗：{str(e)}"
-
-def delete_user(username):
-    """刪除用戶"""
-    try:
-        supabase.table("users").delete().eq("username", username.upper()).execute()
-        return True, "用戶刪除成功！"
-    except Exception as e:
-        return False, f"刪除失敗：{str(e)}"
+    except:
+        return False, "更新失敗"
 
 def verify_user(username, password):
-    """驗證用戶登入"""
     try:
         res = supabase.table("users").select("*").eq("username", username.upper()).execute()
         if not res.data:
             return False, "用戶不存在"
         user = res.data[0]
-        if user.get("password_hash", "") == password:
-            return True, user.get("role", "Staff")
+        stored_hash = user.get("password_hash", "")
+        user_role = user.get("role", "Staff")
+        if _verify_password(password, stored_hash):
+            return True, user_role
         else:
             return False, "密碼錯誤"
-    except Exception as e:
-        return False, f"驗證失敗：{str(e)}"
+    except:
+        return False, "驗證失敗"

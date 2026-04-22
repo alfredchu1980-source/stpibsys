@@ -2,57 +2,60 @@
 import streamlit as st
 import pandas as pd
 from datetime import datetime
-import io
-import os
 import streamlit.components.v1 as components
 from config import CONFIG
-from utils import write_audit_log, play_audio, style_rows, get_excel_formats
+from utils import write_audit_log, play_audio, style_rows
 import database as db
 import services
-
-# --- 1. 登入組件 ---
 
 def show_login():
     st.markdown("<h1 style='text-align: center;'>🔐 Shoptoplus 系統登入</h1>", unsafe_allow_html=True)
     col1, col2, col3 = st.columns([1, 1, 1])
     with col2:
-        user_input = st.text_input("用戶名稱 (Name)", key="login_username").strip().upper()
-        pass_input = st.text_input("密碼 (Password)", type="password", key="login_password").strip()
-        
-        if st.button("登入", use_container_width=True, key="login_button"):
-            if not user_input:
-                st.error("❌ 請輸入用戶名稱")
-            elif not pass_input:
-                st.error("❌ 請輸入密碼")
-            else:
-                success, result = db.verify_user(user_input, pass_input)
-                if success:
-                    st.session_state.role = result
-                    st.session_state.logged_in = True
-                    st.session_state.username = user_input.upper()
-                    write_audit_log(user_input, "用戶登入", "N/A")
-                    st.rerun()
+        with st.form("login_form", clear_on_submit=False):
+            user_input = st.text_input("用戶名稱 (Name)", key="login_username").strip().upper()
+            pass_input = st.text_input("密碼 (Password)", type="password", key="login_password").strip()
+            submit = st.form_submit_button("登入", use_container_width=True)
+            if submit:
+                if not user_input:
+                    st.error("❌ 請輸入用戶名稱")
+                elif not pass_input:
+                    st.error("❌ 請輸入密碼")
                 else:
-                    st.error(f"❌ 登入失敗：{result}")
-
-# --- 2. 側邊欄組件 (V70 核心結構) ---
+                    success, result = db.verify_user(user_input, pass_input)
+                    if success:
+                        st.session_state.role = result
+                        st.session_state.logged_in = True
+                        st.session_state.username = user_input.upper()
+                        st.session_state.login_time = datetime.now()
+                        write_audit_log(user_input, "用戶登入", "N/A")
+                        st.rerun()
+                    else:
+                        st.error(f"❌ 登入失敗：{result}")
 
 def render_sidebar_controls():
-    """
-    在側邊欄渲染控制項：建立新任務、選擇作業批次
-    必須在 st.sidebar 區塊內調用
-    """
     user_role = st.session_state.role
+    current_user = st.session_state.username
     
-    # 建立新任務 (Admin 和 Staff 可用)
+    user_floor = None
+    if current_user in CONFIG["ROLES"].get("STAFF_3F", []):
+        user_floor = "3F"
+    elif current_user in CONFIG["ROLES"].get("STAFF_5F", []):
+        user_floor = "5F"
+    
     if user_role in ["Admin", "Staff"]:
         with st.expander("🚀 建立新任務", expanded=False):
             cust_name = st.text_input("🏢 客戶名稱", value="預設客戶", key="sidebar_cust_name")
             new_batch_id = st.text_input("新任務編號", placeholder="例如：JOB-001", key="sidebar_batch_id")
             uploaded_file = st.file_uploader("上傳 Excel", type=["xlsx"], key="sidebar_uploader")
             
+            if user_role == "Admin":
+                batch_floor = st.selectbox("作業樓層", ["3F", "5F"], key="sidebar_floor")
+            else:
+                batch_floor = user_floor if user_floor else "3F"
+            
             if st.button("建立任務", use_container_width=True, key="sidebar_create_btn") and new_batch_id and uploaded_file:
-                success, msg = services.process_excel_upload(uploaded_file, new_batch_id, cust_name, "", "")
+                success, msg = services.process_excel_upload(uploaded_file, new_batch_id, cust_name, batch_floor, "")
                 if success: 
                     st.success(msg)
                     st.rerun()
@@ -61,29 +64,91 @@ def render_sidebar_controls():
         
         st.divider()
     
-    # 選擇作業批次
-    batches = db.get_all_batches()
-    current_batch = st.selectbox("📦 選擇作業批次", ["請選擇"] + batches, key="sidebar_batch_select")
-    
-    if user_role == "Admin" and current_batch != "請選擇":
-        if st.button("🗑️ 刪除此任務", use_container_width=True, key="sidebar_delete_btn"):
-            if db.delete_batch(current_batch): 
-                st.rerun()
-    
-    return current_batch
+    if user_role in ["Admin", "Staff"]:
+        all_batches = db.get_all_batches()
+        
+        if user_floor and user_role != "Admin":
+            batches = db.get_batches_by_floor(user_floor)
+            st.caption(f"📍 樓層過濾：{user_floor}")
+        else:
+            batches = all_batches
+        
+        current_batch = st.selectbox("📦 選擇作業批次", ["請選擇"] + batches, key="sidebar_batch_select")
+        
+        if user_role == "Admin" and current_batch != "請選擇":
+            if st.button("🗑️ 刪除此任務", use_container_width=True, key="sidebar_delete_btn"):
+                if db.delete_batch(current_batch): 
+                    st.rerun()
+        
+        return current_batch
+    else:
+        return None
 
 def render_user_management():
-    """用戶管理功能（所有用戶只能修改自己的密碼）"""
+    user_role = st.session_state.role
+    
+    if user_role == "Admin":
+        with st.expander("👥 建立客戶帳號", expanded=False):
+            st.markdown("**建立新的客戶登入帳號**")
+            new_username = st.text_input("客戶用戶名稱", key="admin_new_username").strip().upper()
+            new_password = st.text_input("初始密碼", type="password", key="admin_new_password").strip()
+            
+            if new_password:
+                if len(new_password) < 6:
+                    st.error("❌ 密碼長度必須至少 6 個字元")
+                elif len(new_password) < 8:
+                    st.warning("⚠️ 建議密碼長度至少 8 個字元")
+                else:
+                    st.success("✅ 密碼強度足夠")
+            
+            if st.button("建立客戶帳號", use_container_width=True, key="admin_create_customer_btn"):
+                if new_username and new_password:
+                    if len(new_password) < 6:
+                        st.error("❌ 密碼長度必須至少 6 個字元")
+                    else:
+                        success, msg = db.create_user(new_username, new_password, "Customer")
+                        if success:
+                            st.success(f"✅ 客戶帳號 {new_username} 建立成功！")
+                            st.info(f"📝 請告知客戶：\n\n用戶名：{new_username}\n密碼：{new_password}")
+                            st.rerun()
+                        else:
+                            st.error(msg)
+                else:
+                    st.error("請填寫用戶名稱和密碼")
+            
+            st.divider()
+            st.markdown("**所有用戶列表**")
+            users_df = db.get_all_users()
+            if not users_df.empty:
+                customer_users = users_df[users_df['role'] == 'Customer']
+                if not customer_users.empty:
+                    st.dataframe(customer_users[['username', 'role', 'created_at']], use_container_width=True)
+                else:
+                    st.info("尚無客戶帳號")
+            else:
+                st.info("尚無用戶數據")
+        
+        st.divider()
+    
     with st.expander("🔑 修改我的密碼", expanded=False):
         current_username = st.session_state.username
         st.caption(f"當前用戶：{current_username}")
-        
         new_pwd = st.text_input("新密碼", type="password", key="new_pwd").strip()
         confirm_pwd = st.text_input("確認新密碼", type="password", key="confirm_pwd").strip()
         
+        if new_pwd:
+            if len(new_pwd) < 6:
+                st.error("❌ 密碼長度必須至少 6 個字元")
+            elif len(new_pwd) < 8:
+                st.warning("⚠️ 建議密碼長度至少 8 個字元")
+            else:
+                st.success("✅ 密碼強度足夠")
+        
         if st.button("更新密碼", use_container_width=True, key="update_pwd_btn"):
             if new_pwd and confirm_pwd:
-                if new_pwd == confirm_pwd:
+                if len(new_pwd) < 6:
+                    st.error("❌ 密碼長度必須至少 6 個字元")
+                elif new_pwd == confirm_pwd:
                     success, msg = db.update_user_password(current_username, new_pwd)
                     if success:
                         st.success(msg)
@@ -97,10 +162,11 @@ def render_user_management():
             else:
                 st.error("請填寫密碼")
 
-# --- 3. 入庫作業分頁 ---
-
 def show_work_tab(current_batch):
-    """入庫作業主頁面"""
+    if current_batch is None:
+        st.info("👈 請在左側選擇任務開始工作。")
+        return
+    
     batch_info = db.get_batch_info(current_batch)
     is_locked = batch_info["status"] == "completed" if batch_info else False
     task_df = db.get_products_by_batch(current_batch)
@@ -133,10 +199,8 @@ def _render_worker_info(task_df, is_locked):
     st.markdown("### 👷 實際作業人員記錄")
     w_col1, w_col2 = st.columns(2)
     first_p = task_df.iloc[0] if not task_df.empty else None
-    w1 = w_col1.text_input("工作人員 1", value=first_p["worker1"] if first_p is not None else "",
-                           disabled=is_locked).strip().upper()
-    w2 = w_col2.text_input("工作人員 2", value=first_p["worker2"] if first_p is not None else "",
-                           disabled=is_locked).strip().upper()
+    w1 = w_col1.text_input("工作人員 1", value=first_p["worker1"] if first_p is not None else "", disabled=is_locked).strip().upper()
+    w2 = w_col2.text_input("工作人員 2", value=first_p["worker2"] if first_p is not None else "", disabled=is_locked).strip().upper()
     return w1, w2
 
 def _render_work_core(current_batch, task_df, is_locked, worker1, worker2):
@@ -148,22 +212,15 @@ def _render_scan_section(current_batch, task_df, is_locked, worker1, worker2):
     def on_scan():
         st.session_state.active_barcode = st.session_state.barcode_scan_input
         st.session_state.barcode_scan_input = ""
-
-    st.text_input("🔍 掃描產品 Barcode", key="barcode_scan_input", 
-                  on_change=on_scan, disabled=is_locked, placeholder="請掃描...")
-    
+    st.text_input("🔍 掃描產品 Barcode", key="barcode_scan_input", on_change=on_scan, disabled=is_locked, placeholder="請掃描...")
     active_barcode = st.session_state.get('active_barcode', "")
     if not active_barcode: return
-
     scan_code = active_barcode.strip()
     sku_records = task_df[task_df['barcode'].astype(str) == scan_code] if not task_df.empty else pd.DataFrame()
-    
     if sku_records.empty:
         st.error(f"❌ 找不到條碼：{scan_code}"); play_audio("error"); return
-
     base_item = sku_records.iloc[0]
     _render_product_status_card(base_item, sku_records)
-
     if not is_locked:
         _render_input_form(current_batch, scan_code, base_item, sku_records, task_df, worker1, worker2)
 
@@ -172,65 +229,173 @@ def _render_product_status_card(base_item, sku_records):
     expected_num = 0 if pd.isna(val_exp) else val_exp
     current_total = pd.to_numeric(sku_records['actual_qty'], errors='coerce').sum()
     
+    if current_total == expected_num:
+        status_color = "#28a745"
+        status_text = "✅ 數量正確"
+    elif current_total > expected_num:
+        status_color = "#dc3545"
+        status_text = "⚠️ 超收"
+    else:
+        status_color = "#007bff"
+        status_text = "⚠️ 少收"
+    
     st.markdown(f"""
-        <div style="background-color: #000000; color: #ffffff; padding: 20px; border-radius: 10px; border: 1px solid #333; margin-bottom: 15px;">
-            <h3 style="margin:0; color: #63b3ed;">📦 {base_item['product_name']}</h3>
+        <div style="background-color: #000000; color: #ffffff; padding: 20px; border-radius: 10px; border: 1px solid #333; margin-bottom: 15px; border-left: 5px solid {status_color};">
+            <h3 style="margin:0; color: {status_color};">📦 {base_item['product_name']}</h3>
             <p style="margin:10px 0; font-size: 18px;">SKU ID: {base_item['sku_id']} | 批次：{base_item.get('lot', 'N/A')}</p>
             <div style="display: flex; justify-content: space-between; font-weight: bold; border-top: 1px solid #333; padding-top: 10px; margin-top: 10px;">
                 <span>總預計：{int(expected_num)}</span>
-                <span style="color: #63b3ed;">目前累計已收：{int(current_total)}</span>
+                <span style="color: {status_color};">{status_text} - 目前累計已收：{int(current_total)}</span>
             </div>
         </div>
     """, unsafe_allow_html=True)
 
 def _render_input_form(current_batch, scan_code, base_item, sku_records, task_df, worker1, worker2):
-    with st.form("input_form", clear_on_submit=True):
+    with st.form("input_form", clear_on_submit=False):
         new_qty = st.text_input("1. 入庫數量", value=str(int(float(base_item['expected_qty'] or 0))))
         new_bbd = st.text_input("2. 到期日期 (YYYY-MM-DD)", value=base_item.get('expiry_date', ''))
         new_loc = st.text_input("3. 存放位置").strip().upper()
         submit = st.form_submit_button("💾 確認儲存", use_container_width=True)
-        
         if submit:
-            success, signal, sound = services.validate_scan_and_save(
-                current_batch, scan_code, new_qty, new_bbd, new_loc, worker1, worker2, task_df
-            )
+            success, signal, sound = services.validate_scan_and_save(current_batch, scan_code, new_qty, new_bbd, new_loc, worker1, worker2, task_df)
             if success: 
                 st.session_state.last_signal = signal
                 play_audio(sound)
+                # 清除 active_barcode 讓焦點回到掃描框
+                st.session_state.active_barcode = ""
                 st.rerun()
             else: 
                 st.error(signal)
                 play_audio(sound)
 
 def _render_inventory_list(current_batch, task_df, is_locked):
+    """入庫清單表格 - 核心顏色邏輯（使用 HTML 顯示顏色）"""
     st.subheader("📋 入庫清單")
     if task_df.empty:
         st.info("尚無資料")
         return
-    display_df = task_df[['seq', 'barcode', 'sku_id', 'product_name', 'actual_qty', 'location', 'expiry_date', 'expected_qty']].copy()
+    
+    # 使用英文欄位名稱（與資料庫匹配）- 不顯示 product_name
+    display_df = task_df[['seq', 'barcode', 'sku_id', 'actual_qty', 'location', 'expiry_date', 'expected_qty']].copy()
+    
+    # 轉換為數字
     display_df['exp_val'] = pd.to_numeric(display_df['expected_qty'], errors='coerce').fillna(0)
-    display_df.columns = ['#', '條碼', 'SKU', '名稱', '入庫', '位置', '到期日', '預計', 'exp_val']
-    st.dataframe(display_df.style.apply(style_rows, axis=1), 
-                 column_config={"exp_val": None, "預計": None}, use_container_width=True, height=500)
-
-# --- 4. 數據報表分頁 ---
+    display_df['act_val'] = pd.to_numeric(display_df['actual_qty'], errors='coerce').fillna(0)
+    
+    # 核心顏色邏輯：為每行添加顏色和狀態
+    def get_row_style(row):
+        exp = row['exp_val']
+        act = row['act_val']
+        if act == 0:
+            return None  # 尚未入庫，不 highlight
+        elif act == exp and exp > 0:
+            return '#28a745'  # GREEN - 數量正確
+        elif act > exp:
+            return '#dc3545'  # RED - 超收
+        else:
+            return '#007bff'  # BLUE - 少收（有入庫但不足）
+    
+    display_df['row_color'] = display_df.apply(get_row_style, axis=1)
+    
+    # 重新命名為中文顯示
+    display_df = display_df.rename(columns={
+        'seq': '#',
+        'barcode': '條碼',
+        'sku_id': 'SKU',
+        'actual_qty': '入庫',
+        'location': '位置',
+        'expiry_date': '到期日',
+        'expected_qty': '預計'
+    })
+    
+    # 使用 HTML 自定義表格顯示顏色 - 調整欄位寬度（不顯示名稱）
+    html_table = '<div style="height: 500px; overflow-y: auto;"><table style="width: 100%; border-collapse: collapse;">'
+    html_table += '<thead style="position: sticky; top: 0; background: #1e1e1e;"><tr>'
+    html_table += '<th style="border: 1px solid #444; padding: 8px; color: white; width: 30px;">#</th>'
+    html_table += '<th style="border: 1px solid #444; padding: 8px; color: white; width: 120px;">條碼</th>'
+    html_table += '<th style="border: 1px solid #444; padding: 8px; color: white; width: 100px;">SKU</th>'
+    html_table += '<th style="border: 1px solid #444; padding: 8px; color: white; width: 50px;">入庫</th>'
+    html_table += '<th style="border: 1px solid #444; padding: 8px; color: white; width: 120px;">位置</th>'
+    html_table += '<th style="border: 1px solid #444; padding: 8px; color: white; width: 100px;">到期日</th>'
+    html_table += '<th style="border: 1px solid #444; padding: 8px; color: white; width: 50px;">預計</th>'
+    html_table += '</tr></thead><tbody>'
+    
+    for _, row in display_df.iterrows():
+        color = row['row_color']
+        if color is None:
+            html_table += f'<tr style="background-color: #2d333b; color: #c9d1d9;">'
+        else:
+            html_table += f'<tr style="background-color: {color}; color: white;">'
+        html_table += f'<td style="border: 1px solid #444; padding: 8px;">{row["#"]}</td>'
+        html_table += f'<td style="border: 1px solid #444; padding: 8px;">{row["條碼"]}</td>'
+        html_table += f'<td style="border: 1px solid #444; padding: 8px;">{row["SKU"]}</td>'
+        html_table += f'<td style="border: 1px solid #444; padding: 8px;">{row["入庫"]}</td>'
+        html_table += f'<td style="border: 1px solid #444; padding: 8px; font-family: monospace;">{row["位置"]}</td>'
+        html_table += f'<td style="border: 1px solid #444; padding: 8px;">{row["到期日"]}</td>'
+        html_table += f'<td style="border: 1px solid #444; padding: 8px;">{row["預計"]}</td>'
+        html_table += '</tr>'
+    
+    html_table += '</tbody></table></div>'
+    
+    st.markdown(html_table, unsafe_allow_html=True)
+    
+    # 顯示顏色圖例
+    st.caption("📊 顏色說明：⚪ 正常 = 尚未入庫 | 🟢 綠色 = 數量正確 | 🔴 紅色 = 超收 | 🔵 藍色 = 少收")
+    
+    # 刪除錯誤記錄功能（放在顏色說明之下）
+    if not is_locked:
+        st.divider()
+        st.subheader("🗑️ 清除錯誤記錄")
+        
+        # 獲取所有已有入庫數據的記錄（highlight 的記錄）- 使用原始 task_df
+        task_df_with_data = task_df[pd.to_numeric(task_df['actual_qty'], errors='coerce').fillna(0) > 0].copy()
+        
+        if task_df_with_data.empty:
+            st.info("尚無已入庫的記錄可清除")
+        else:
+            # 建立下拉選單選項（使用原始 task_df 的 seq）
+            options = []
+            for _, row in task_df_with_data.iterrows():
+                options.append(f"{row['seq']} - {row['sku_id']} (入庫：{row['actual_qty']}, 位置：{row['location']})")
+            
+            selected = st.selectbox("選擇要清除的記錄", ["請選擇"] + options, key="delete_selector")
+            
+            if selected != "請選擇":
+                # 解析選中的記錄
+                target_seq = selected.split(" - ")[0]
+                st.warning(f"準備清除：序號 {target_seq}")
+                
+                col_del1, col_del2 = st.columns([3, 1])
+                with col_del1:
+                    st.caption("此操作將清除該記錄的入庫數據，恢復為尚未入庫狀態")
+                with col_del2:
+                    if st.button("🗑️ 確認清除", use_container_width=True, key="confirm_delete_btn"):
+                        try:
+                            db.supabase.table("products").update({
+                                "actual_qty": "",
+                                "location": "",
+                                "expiry_date": "",
+                                "worker1": "",
+                                "worker2": "",
+                                "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            }).eq("batch_id", current_batch).eq("seq", target_seq).execute()
+                            st.success("✅ 已清除記錄")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"❌ 清除失敗：{str(e)}")
 
 def show_report_tab(current_batch):
     df = db.get_products_by_batch(current_batch)
     st.markdown(f"### 📊 {current_batch} 數據統計")
     st.dataframe(df, use_container_width=True)
-    
     st.divider()
-    
     reports = services.get_reports_for_download(current_batch)
     if reports:
         c1, c2 = st.columns(2)
         with c1:
-            st.download_button("📥 下載 IVR 差異報告", data=reports["ivr"]["data"], 
-                               file_name=reports["ivr"]["filename"], use_container_width=True)
+            st.download_button("📥 下載 IVR 差異報告", data=reports["ivr"]["data"], file_name=reports["ivr"]["filename"], use_container_width=True)
         with c2:
-            st.download_button("📥 下載標準入庫清單", data=reports["std"]["data"], 
-                               file_name=reports["std"]["filename"], use_container_width=True)
+            st.download_button("📥 下載標準入庫清單", data=reports["std"]["data"], file_name=reports["std"]["filename"], use_container_width=True)
 
 def add_auto_focus():
     components.html("""<script>
