@@ -195,8 +195,8 @@ def update_user_password(username, new_password):
         }
         supabase.table("users").update(data).eq("username", username.upper()).execute()
         return True, "密碼更新成功！"
-    except:
-        return False, "更新失敗"
+    except Exception as e:
+        return False, f"更新失敗：{str(e)}"
 
 def verify_user(username, password):
     try:
@@ -210,5 +210,5 @@ def verify_user(username, password):
             return True, user_role
         else:
             return False, "密碼錯誤"
-    except:
-        return False, "驗證失敗"
+    except Exception as e:
+        return False, f"驗證失敗：{str(e)}"
