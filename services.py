@@ -28,7 +28,8 @@ def process_excel_upload(uploaded_file, batch_id, customer_name, floor, w1):
         mapping = CONFIG["EXCEL_MAPPING"]
         col_idx = {k: next((i for i, v in enumerate(header_row) if any(a in v for a in v_list)), 0) for k, v_list in mapping.items()}
         
-        db.create_batch(batch_id, customer_name.strip().upper(), status='pending', source='Client', floor=floor)
+        # 保留客戶名稱原始大小寫（與左側面板一致）
+        db.create_batch(batch_id, customer_name.strip(), status='pending', source='Client', floor=floor)
         
         for i, row in df_raw.iloc[1:].iterrows():
             product_data = (batch_id, str(i), str(row[col_idx['Barcode']]), str(row[col_idx['SKU ID']]), str(row[col_idx['產品名稱']]), str(row[col_idx['預計數量']]), "", "", "", w1, "", "", "")
