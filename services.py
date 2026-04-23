@@ -53,17 +53,29 @@ def validate_scan_and_save(batch_id, scan_code, new_qty, new_bbd, new_loc, worke
     input_val = float(new_qty)
     expected_total = float(pd.to_numeric(base_item['expected_qty'], errors='coerce') or 0)
 
-    occupant = task_df[task_df['location'].str.upper() == new_loc]
-    if not occupant.empty:
-        occ = occupant.iloc[0]
-        if str(occ['sku_id']) == str(base_item['sku_id']) and str(occ['expiry_date']) == bbd_str:
-            new_total = float(occ['actual_qty'] or 0) + input_val
-            success = db.update_product_qty(batch_id, occ['seq'], new_total, worker1, worker2)
-            if not success:
-                return False, "❌ 更新失敗，請檢查資料庫連線", "error"
+    # 只有位置 "KC" 可以重複使用無限制，其他位置仍需檢查是否被佔用
+    if new_loc.upper() != "KC":
+        occupant = task_df[task_df['location'].str.upper() == new_loc]
+        if not occupant.empty:
+            occ = occupant.iloc[0]
+            if str(occ['sku_id']) == str(base_item['sku_id']) and str(occ['expiry_date']) == bbd_str:
+                new_total = float(occ['actual_qty'] or 0) + input_val
+                success = db.update_product_qty(batch_id, occ['seq'], new_total, worker1, worker2)
+                if not success:
+                    return False, "❌ 更新失敗，請檢查資料庫連線", "error"
+            else:
+                return False, f"❌ 庫位 [{new_loc}] 已被佔用！", "error"
         else:
-            return False, f"❌ 庫位 [{new_loc}] 已被佔用！", "error"
+            empty_rows = sku_records[sku_records['location'] == ""]
+            target_seq = empty_rows.iloc[0]['seq'] if not empty_rows.empty else f"{base_item['seq'].split('.')[0]}.{len(sku_records)}"
+            product_data = (batch_id, target_seq, scan_code, base_item['sku_id'], base_item['product_name'], 
+                            base_item['expected_qty'], str(input_val), new_loc, bbd_str, worker1, worker2, 
+                            datetime.now().strftime("%Y-%m-%d %H:%M:%S"), base_item.get('lot', ''))
+            success = db.insert_product(product_data)
+            if not success:
+                return False, "❌ 寫入失敗，請檢查資料庫連線", "error"
     else:
+        # 位置 "KC" 可以直接新增，不檢查是否被佔用
         empty_rows = sku_records[sku_records['location'] == ""]
         target_seq = empty_rows.iloc[0]['seq'] if not empty_rows.empty else f"{base_item['seq'].split('.')[0]}.{len(sku_records)}"
         product_data = (batch_id, target_seq, scan_code, base_item['sku_id'], base_item['product_name'], 
