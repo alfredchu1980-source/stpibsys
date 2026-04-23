@@ -74,3 +74,46 @@ def show_office_admin():
             st.dataframe(products[available_cols], use_container_width=True)
         else:
             st.info("該批次尚無產品數據")
+    
+    st.divider()
+    
+    # 📚 參考表模組掛載點（Option B+）
+    try:
+        from hooks import REFERENCE_MODULE_ENABLED, REFERENCE_SHOW_IN_OFFICE, check_module_installation
+        
+        if REFERENCE_MODULE_ENABLED and REFERENCE_SHOW_IN_OFFICE:
+            # 檢查模組安裝狀態
+            install_status = check_module_installation()
+            
+            if install_status['installed']:
+                from reference_module import render_reference_uploader
+                render_reference_uploader(location="office")
+            else:
+                # 模組未正確安裝，顯示警告和安裝說明
+                st.markdown("### 📚 參考表管理")
+                st.error("📚 參考表模組未正確安裝")
+                
+                for error in install_status['errors']:
+                    st.error(f"❌ {error}")
+                for warning in install_status['warnings']:
+                    st.warning(f"⚠️ {warning}")
+                
+                st.divider()
+                st.markdown("**📖 安裝步驟：**")
+                st.code("""
+1. 確認 hooks.py 已放到 C:\\PT_IB\\ 目錄
+2. 確認 reference_module/ 資料夾已創建
+3. 確認 reference_module/ 內有以下檔案：
+   - __init__.py
+   - ref_table.py
+   - scanner.py
+   - uploader.py
+4. 刪除 C:\\PT_IB\\__pycache__ 資料夾
+5. 重新啟動系統
+                """)
+                
+    except ImportError as e:
+        # hooks.py 不存在
+        st.markdown("### 📚 參考表管理")
+        st.error(f"📚 hooks.py 未找到：{e}")
+        st.caption("💡 請聯繫系統管理員安裝參考表模組")

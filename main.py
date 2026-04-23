@@ -48,7 +48,10 @@ else:
         
         user_role = st.session_state.role
         
-        if user_role == "Admin":
+        # 確保角色名稱正確（大小寫不敏感）
+        role_check = user_role.lower() if user_role else ""
+        
+        if role_check == "admin":
             pending_count = db.get_pending_count()
             badge = f"🔴 {pending_count}" if pending_count > 0 else ""
             menu = st.radio("功能菜單", [
@@ -57,7 +60,7 @@ else:
                 "🖥️ Office 管理", 
                 "📺 電視看板"
             ], label_visibility="collapsed")
-        elif user_role == "Customer":
+        elif role_check == "customer":
             pending_count = db.get_pending_count()
             badge = f"🔴 {pending_count}" if pending_count > 0 else ""
             menu = st.radio("功能菜單", [
@@ -69,6 +72,38 @@ else:
             ], label_visibility="collapsed")
         
         st.divider()
+        
+        # 📚 參考表模組掛載點（Option B+）- 僅 Admin 可見
+        try:
+            from hooks import REFERENCE_MODULE_ENABLED, REFERENCE_SHOW_IN_SIDEBAR, check_module_installation
+            
+            if role_check == "admin" and REFERENCE_MODULE_ENABLED and REFERENCE_SHOW_IN_SIDEBAR:
+                # 檢查模組安裝狀態
+                install_status = check_module_installation()
+                
+                if install_status['installed']:
+                    # 模組已正確安裝，顯示上傳按鈕
+                    from reference_module import render_reference_uploader
+                    render_reference_uploader(location="sidebar")
+                    st.divider()
+                else:
+                    # 模組未正確安裝，顯示警告
+                    with st.expander("⚠️ 參考表模組未安裝", expanded=True):
+                        st.error("📚 參考表模組未正確安裝")
+                        for error in install_status['errors']:
+                            st.error(f"❌ {error}")
+                        for warning in install_status['warnings']:
+                            st.warning(f"⚠️ {warning}")
+                        st.caption("💡 請聯繫系統管理員安裝參考表模組")
+                    st.divider()
+                    
+        except ImportError as e:
+            # hooks.py 不存在
+            if role_check == "admin":
+                with st.expander("⚠️ 參考表模組未安裝", expanded=True):
+                    st.error(f"📚 hooks.py 未找到：{e}")
+                    st.caption("💡 請聯繫系統管理員安裝參考表模組")
+                st.divider()
         
         st.session_state.ui_mode = st.radio("🖥️ 介面佈局", ["電腦模式", "手機模式"], index=0 if st.session_state.ui_mode == "電腦模式" else 1)
         

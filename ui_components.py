@@ -221,6 +221,23 @@ def _render_scan_section(current_batch, task_df, is_locked, worker1, worker2):
         st.error(f"❌ 找不到條碼：{scan_code}"); play_audio("error"); return
     base_item = sku_records.iloc[0]
     _render_product_status_card(base_item, sku_records)
+    
+    # 🔍 參考表模組掛載點（Option B+）
+    try:
+        from hooks import REFERENCE_MODULE_ENABLED, REFERENCE_SHOW_IN_SCAN
+        if REFERENCE_MODULE_ENABLED and REFERENCE_SHOW_IN_SCAN:
+            from reference_module import render_reference_scanner
+            render_reference_scanner(scan_code)
+    except ImportError:
+        pass  # 模組未安裝時不影響原有功能
+    except Exception as e:
+        # 其他錯誤，顯示警告（僅 Admin 可見）
+        try:
+            if st.session_state.role == "Admin":
+                st.warning(f"⚠️ 參考表功能異常：{e}")
+        except:
+            pass
+    
     if not is_locked:
         _render_input_form(current_batch, scan_code, base_item, sku_records, task_df, worker1, worker2)
 
