@@ -53,18 +53,39 @@ def validate_scan_and_save(batch_id, scan_code, new_qty, new_bbd, new_loc, worke
     input_val = float(new_qty)
     expected_total = float(pd.to_numeric(base_item['expected_qty'], errors='coerce') or 0)
 
+    # 獲取批次樓層資訊 (3F 凍倉 vs 5F 常溫)
+    batch_info = db.get_batch_info(batch_id)
+    floor = batch_info.get('floor', '5F') if batch_info else '5F'
+
     # 只有位置 "KC" 可以重複使用無限制，其他位置仍需檢查是否被佔用
     if new_loc.upper() != "KC":
         occupant = task_df[task_df['location'].str.upper() == new_loc]
         if not occupant.empty:
             occ = occupant.iloc[0]
             if str(occ['sku_id']) == str(base_item['sku_id']) and str(occ['expiry_date']) == bbd_str:
+                # 相同 SKU + 效期可合併
                 new_total = float(occ['actual_qty'] or 0) + input_val
                 success = db.update_product_qty(batch_id, occ['seq'], new_total, worker1, worker2)
                 if not success:
                     return False, "❌ 更新失敗，請檢查資料庫連線", "error"
             else:
-                return False, f"❌ 庫位 [{new_loc}] 已被佔用！", "error"
+                # ✅ 按樓層決定處理方式
+                if floor == "3F":
+                    # 3F 凍倉：只提醒，允許位置重複
+                    import streamlit as st
+                    st.warning(f"⚠️ 提醒：庫位 [{new_loc}] 已被使用 (SKU: {occ['sku_id']}, 效期：{occ['expiry_date']})")
+                    # 允許繼續，新增新記錄
+                    empty_rows = sku_records[sku_records['location'] == ""]
+                    target_seq = empty_rows.iloc[0]['seq'] if not empty_rows.empty else f"{base_item['seq'].split('.')[0]}.{len(sku_records)}"
+                    product_data = (batch_id, target_seq, scan_code, base_item['sku_id'], base_item['product_name'], 
+                                    base_item['expected_qty'], str(input_val), new_loc, bbd_str, worker1, worker2, 
+                                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"), base_item.get('lot', ''))
+                    success = db.insert_product(product_data)
+                    if not success:
+                        return False, "❌ 寫入失敗，請檢查資料庫連線", "error"
+                else:
+                    # 5F 常溫：維持原有阻擋邏輯
+                    return False, f"❌ 庫位 [{new_loc}] 已被佔用！", "error"
         else:
             empty_rows = sku_records[sku_records['location'] == ""]
             target_seq = empty_rows.iloc[0]['seq'] if not empty_rows.empty else f"{base_item['seq'].split('.')[0]}.{len(sku_records)}"
@@ -107,7 +128,9 @@ def get_reports_for_download(batch_id):
         df = db.get_products_by_batch(batch_id)
         timestamp = datetime.now().strftime('%Y%m%d_%H%M')
         ivr_data = _generate_ivr_excel_bytes(batch_id, batch_info, df)
-        std_data = _generate_std_excel_bytes(batch_id, batch_info, df)
+        # ✅ 獲取樓層並傳遞給生成函數
+        floor = batch_info.get('floor', '5F') if batch_info else '5F'
+        std_data = _generate_std_excel_bytes(batch_id, batch_info, df, floor)
         return {"ivr": {"filename": f"IVR_{batch_id}_{timestamp}.xlsx", "data": ivr_data}, "std": {"filename": f"Inbound_{batch_id}_{timestamp}.xlsx", "data": std_data}}
     except: return None
 
@@ -153,7 +176,7 @@ def _generate_ivr_excel_bytes(batch_id, batch_info, df):
         worksheet.set_column('D:F', 12); worksheet.set_column('G:H', 20)
     return output.getvalue()
 
-def _generate_std_excel_bytes(batch_id, batch_info, df):
+def _generate_std_excel_bytes(batch_id, batch_info, df, floor='5F'):
     """生成標準入庫報告 - 按照指定格式排列"""
     output = io.BytesIO()
     
@@ -172,8 +195,11 @@ def _generate_std_excel_bytes(batch_id, batch_info, df):
     # 批次號邏輯：COBOLIFE/LINBERG 用 LOT，其他用 YYMMDDUD
     today_str = datetime.now().strftime('%y%m%d') + 'UD'
     
-    # 貨位前綴
-    location_prefix = 'ZONE/5/F/'
+    # ✅ 根據樓層動態決定貨位前綴
+    if floor == '3F':
+        location_prefix = 'ZONE/3-'  # 3F 凍倉前綴
+    else:
+        location_prefix = 'ZONE/5/F/'  # 5F 常溫前綴
     
     # 建立新格式的 DataFrame
     formatted_data = []
