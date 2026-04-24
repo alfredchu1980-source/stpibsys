@@ -24,8 +24,9 @@ def init_database():
     pass
 
 def get_all_batches():
+    """獲取所有活躍批次（排除已完成）"""
     try:
-        res = supabase.table("batches").select("batch_id").in_("status", ["Active", "completed", "pending"]).order("created_at", desc=True).execute()
+        res = supabase.table("batches").select("batch_id").in_("status", ["Active", "pending"]).order("created_at", desc=True).execute()
         return [r["batch_id"] for r in res.data]
     except:
         return []
