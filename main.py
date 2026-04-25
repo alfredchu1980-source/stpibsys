@@ -25,9 +25,13 @@ if 'logged_in' not in st.session_state: st.session_state.logged_in = False
 if 'ui_mode' not in st.session_state: st.session_state.ui_mode = "電腦模式"
 if 'login_time' not in st.session_state: st.session_state.login_time = None
 
+# 登入逾時檢查（60 分鐘，alfred 賬戶除外）
 if st.session_state.logged_in and st.session_state.login_time:
     elapsed = datetime.now() - st.session_state.login_time
-    if elapsed > timedelta(minutes=30):
+    # 檢查是否為 alfred 賬戶（不区分大小寫）
+    is_alfred = st.session_state.username.lower() == "alfred" if st.session_state.username else False
+    # 非 alfred 賬戶且超過 60 分鐘則強制登出
+    if not is_alfred and elapsed > timedelta(minutes=60):
         st.warning("⚠️ 登入已逾時，請重新登入")
         st.session_state.logged_in = False
         st.session_state.login_time = None
@@ -36,6 +40,10 @@ if st.session_state.logged_in and st.session_state.login_time:
 if not st.session_state.logged_in:
     show_login()
 else:
+    # 初始化 menu 變量
+    menu = None
+    badge = ""
+    
     with st.sidebar:
         st.title(f"🏢 {CONFIG['SYSTEM_NAME']}")
         st.caption(CONFIG["VERSION"])
@@ -57,7 +65,7 @@ else:
             menu = st.radio("功能菜單", [
                 "📦 倉庫端 (V70 核心)", 
                 f"📩 客戶端預報 {badge}", 
-                "🖥️ Office 管理", 
+                "📋 秘書台", 
                 "📺 電視看板"
             ], label_visibility="collapsed")
         elif role_check == "customer":
@@ -113,12 +121,14 @@ else:
         render_user_management()
         
         # 注意：登出按鈕已移至 warehouse_v70.py（僅倉庫端需要）
-
-    if menu == "📦 倉庫端 (V70 核心)":
-        show_warehouse_tab()
-    elif menu == f"📩 客戶端預報 {badge}":
-        show_client_portal()
-    elif menu == "🖥️ Office 管理":
-        show_office_admin()
-    elif menu == "📺 電視看板":
-        show_tv_dashboard()
+    
+    # 根據選單顯示頁面
+    if menu:
+        if menu == "📦 倉庫端 (V70 核心)":
+            show_warehouse_tab()
+        elif menu == f"📩 客戶端預報 {badge}":
+            show_client_portal()
+        elif menu == "📋 秘書台":
+            show_office_admin()
+        elif menu == "📺 電視看板":
+            show_tv_dashboard()

@@ -186,7 +186,7 @@ def show_work_tab(current_batch):
         _render_work_core(current_batch, task_df, is_locked, worker1, worker2)
         st.divider()
         _render_inventory_list(current_batch, task_df, is_locked)
-
+    
     if not is_locked and st.session_state.role in ["Admin", "Staff"]:
         st.divider()
         if st.button("✅ 正式完成入庫並鎖定", type="primary", use_container_width=True):
@@ -210,8 +210,13 @@ def _render_work_core(current_batch, task_df, is_locked, worker1, worker2):
 
 def _render_scan_section(current_batch, task_df, is_locked, worker1, worker2):
     def on_scan():
+        # 新掃描開始時，清除舊的掃描記錄和狀態信號，避免混淆
         st.session_state.active_barcode = st.session_state.barcode_scan_input
         st.session_state.barcode_scan_input = ""
+        # 清除舊的狀態信號，確保只显示當前掃描的結果
+        if 'last_signal' in st.session_state:
+            del st.session_state.last_signal
+    
     st.text_input("🔍 掃描產品 Barcode", key="barcode_scan_input", on_change=on_scan, disabled=is_locked, placeholder="請掃描...")
     active_barcode = st.session_state.get('active_barcode', "")
     if not active_barcode: return
@@ -292,25 +297,73 @@ def _render_inventory_list(current_batch, task_df, is_locked):
         st.info("尚無資料")
         return
     
-    # 使用英文欄位名稱（與資料庫匹配）- 不顯示 product_name
+    # 複製數據並按 barcode 和 seq 排序，確保相同條碼的物品相鄰顯示
     display_df = task_df[['seq', 'barcode', 'sku_id', 'actual_qty', 'location', 'expiry_date', 'expected_qty']].copy()
     
-    # 轉換為數字
+    # 排序：先按 barcode 排序，再按 seq 排序（確保 #1, #1.1, #1.2 相鄰）
+    display_df = display_df.sort_values(['barcode', 'seq'], ascending=[True, True]).reset_index(drop=True)
+    
+    # 轉換 expected_qty 為數字
     display_df['exp_val'] = pd.to_numeric(display_df['expected_qty'], errors='coerce').fillna(0)
-    display_df['act_val'] = pd.to_numeric(display_df['actual_qty'], errors='coerce').fillna(0)
+    
+    # 計算每個 barcode 的總實際入庫數量（用於判斷是否超收）
+    def calc_barcode_total(barcode):
+        barcode_rows = display_df[display_df['barcode'] == barcode]
+        total = 0
+        for _, row in barcode_rows.iterrows():
+            raw_qty = row['actual_qty']
+            if pd.notna(raw_qty) and str(raw_qty).strip() != "" and str(raw_qty).strip().lower() != "nan":
+                try:
+                    total += float(str(raw_qty).strip())
+                except:
+                    pass
+        return total
+    
+    # 為每個 barcode 計算總入庫數量
+    barcode_totals = {}
+    for barcode in display_df['barcode'].unique():
+        barcode_totals[barcode] = calc_barcode_total(barcode)
+    
+    # 為每個 barcode 計算總預計數量
+    barcode_expected = {}
+    for barcode in display_df['barcode'].unique():
+        exp_val = display_df[display_df['barcode'] == barcode]['exp_val'].iloc[0]
+        barcode_expected[barcode] = exp_val
     
     # 核心顏色邏輯：為每行添加顏色和狀態
     def get_row_style(row):
-        exp = row['exp_val']
-        act = row['act_val']
-        if act == 0:
-            return None  # 尚未入庫，不 highlight
-        elif act == exp and exp > 0:
-            return '#28a745'  # GREEN - 數量正確
-        elif act > exp:
-            return '#dc3545'  # RED - 超收
+        barcode = row['barcode']
+        raw_qty = row['actual_qty']
+        
+        # 檢查是否未掃描：空值、None、NaN、空字符串、或只是 "0"
+        is_unscanned = (
+            pd.isna(raw_qty) or 
+            str(raw_qty).strip() == "" or 
+            str(raw_qty).strip().lower() == "nan" or
+            str(raw_qty).strip() == "0"
+        )
+        
+        if is_unscanned:
+            return None  # 尚未入庫，不 highlight（透明）
+        
+        # 已掃描，獲取該 barcode 的總入庫數量和總預計數量
+        total_received = barcode_totals.get(barcode, 0)
+        total_expected = barcode_expected.get(barcode, 0)
+        
+        location = str(row['location']).strip() if pd.notna(row['location']) else ""
+        expiry = str(row['expiry_date']).strip() if pd.notna(row['expiry_date']) else ""
+        
+        # 紅色：該 barcode 的總入庫數量 > 總預計數量（超收）- 所有記錄都顯示紅色
+        if total_received > total_expected:
+            return '#dc3545'  # RED - 超收（所有該 barcode 的記錄）
+        
+        # 綠色：總數量正確 + 有儲位 + 有到期日（表示已完整掃描）
+        elif total_received == total_expected and total_expected > 0 and location and expiry:
+            return '#28a745'  # GREEN - 已完成入庫
+        
+        # 藍色：少收
         else:
-            return '#007bff'  # BLUE - 少收（有入庫但不足）
+            return '#007bff'  # BLUE - 少收
     
     display_df['row_color'] = display_df.apply(get_row_style, axis=1)
     
@@ -343,13 +396,14 @@ def _render_inventory_list(current_batch, task_df, is_locked):
             html_table += f'<tr style="background-color: #2d333b; color: #c9d1d9;">'
         else:
             html_table += f'<tr style="background-color: {color}; color: white;">'
+        
         html_table += f'<td style="border: 1px solid #444; padding: 8px;">{row["#"]}</td>'
         html_table += f'<td style="border: 1px solid #444; padding: 8px;">{row["條碼"]}</td>'
         html_table += f'<td style="border: 1px solid #444; padding: 8px;">{row["SKU"]}</td>'
-        html_table += f'<td style="border: 1px solid #444; padding: 8px;">{row["入庫"]}</td>'
-        html_table += f'<td style="border: 1px solid #444; padding: 8px; font-family: monospace;">{row["位置"]}</td>'
+        html_table += f'<td style="border: 1px solid #444; padding: 8px; text-align: center;">{row["入庫"]}</td>'
+        html_table += f'<td style="border: 1px solid #444; padding: 8px;">{row["位置"]}</td>'
         html_table += f'<td style="border: 1px solid #444; padding: 8px;">{row["到期日"]}</td>'
-        html_table += f'<td style="border: 1px solid #444; padding: 8px;">{row["預計"]}</td>'
+        html_table += f'<td style="border: 1px solid #444; padding: 8px; text-align: center;">{row["預計"]}</td>'
         html_table += '</tr>'
     
     html_table += '</tbody></table></div>'
@@ -357,7 +411,7 @@ def _render_inventory_list(current_batch, task_df, is_locked):
     st.markdown(html_table, unsafe_allow_html=True)
     
     # 顯示顏色圖例
-    st.caption("📊 顏色說明：⚪ 正常 = 尚未入庫 | 🟢 綠色 = 數量正確 | 🔴 紅色 = 超收 | 🔵 藍色 = 少收")
+    st.caption("📊 顏色說明：⚪ 正常 = 尚未入庫 | 🟢 綠色 = 已完成（數量正確 + 有儲位 + 有到期日） | 🔴 紅色 = 超收（該條碼總入庫 > 總預計） | 🔵 藍色 = 少收")
     
     # 刪除錯誤記錄功能（放在顏色說明之下）
     if not is_locked:
@@ -368,12 +422,11 @@ def _render_inventory_list(current_batch, task_df, is_locked):
         task_df_with_data = task_df[pd.to_numeric(task_df['actual_qty'], errors='coerce').fillna(0) > 0].copy()
         
         if task_df_with_data.empty:
-            st.info("尚無已入庫的記錄可清除")
+            st.info("目前沒有已入庫的記錄")
         else:
-            # 建立下拉選單選項（使用原始 task_df 的 seq）
             options = []
             for _, row in task_df_with_data.iterrows():
-                options.append(f"{row['seq']} - {row['sku_id']} (入庫：{row['actual_qty']}, 位置：{row['location']})")
+                options.append(f"{row['seq']} - {row['barcode']} ({row['sku_id']}) - 入庫：{row['actual_qty']}")
             
             selected = st.selectbox("選擇要清除的記錄", ["請選擇"] + options, key="delete_selector")
             
@@ -386,9 +439,11 @@ def _render_inventory_list(current_batch, task_df, is_locked):
                 with col_del1:
                     st.caption("此操作將清除該記錄的入庫數據，恢復為尚未入庫狀態")
                 with col_del2:
-                    if st.button("🗑️ 確認清除", use_container_width=True, key="confirm_delete_btn"):
+                    if st.button("🗑️ 確認清除", use_container_width=True, type="primary"):
                         try:
-                            db.supabase.table("products").update({
+                            # 清除該記錄的入庫數據
+                            supabase = db.get_supabase_client()
+                            supabase.table("products").update({
                                 "actual_qty": "",
                                 "location": "",
                                 "expiry_date": "",
@@ -412,9 +467,10 @@ def show_report_tab(current_batch):
         with c1:
             st.download_button("📥 下載 IVR 差異報告", data=reports["ivr"]["data"], file_name=reports["ivr"]["filename"], use_container_width=True)
         with c2:
-            st.download_button("📥 下載標準入庫清單", data=reports["std"]["data"], file_name=reports["std"]["filename"], use_container_width=True)
+            st.download_button("📥 下載 STD 總結報告", data=reports["std"]["data"], file_name=reports["std"]["filename"], use_container_width=True)
 
 def add_auto_focus():
+    """自動聚焦掃描輸入框"""
     components.html("""<script>
         function smartFocus() {
             const activeEl = window.parent.document.activeElement;
