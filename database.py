@@ -24,9 +24,9 @@ def init_database():
     pass
 
 def get_all_batches():
-    """獲取所有活躍批次（排除已完成）"""
+    """獲取所有批次（包含已完成）"""
     try:
-        res = supabase.table("batches").select("batch_id").in_("status", ["Active", "pending"]).order("created_at", desc=True).execute()
+        res = supabase.table("batches").select("batch_id").in_("status", ["Active", "pending", "completed"]).order("created_at", desc=True).execute()
         return [r["batch_id"] for r in res.data]
     except:
         return []
@@ -120,9 +120,9 @@ def get_batches_by_status(status_list):
         return pd.DataFrame()
 
 def get_batches_by_floor(floor):
-    """根據樓層獲取批次"""
+    """根據樓層獲取批次（包含已完成）"""
     try:
-        res = supabase.table("batches").select("*").eq("floor", floor).in_("status", ["Active", "pending"]).order("created_at", desc=True).execute()
+        res = supabase.table("batches").select("*").eq("floor", floor).in_("status", ["Active", "pending", "completed"]).order("created_at", desc=True).execute()
         return [r["batch_id"] for r in res.data]
     except:
         return []
@@ -198,58 +198,22 @@ def update_user_password(username, new_password):
         hashed_password = _hash_password(new_password)
         if not hashed_password:
             return False, "密碼處理失敗"
-        data = {
+        supabase.table("users").update({
             "password_hash": hashed_password,
             "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        }
-        supabase.table("users").update(data).eq("username", username.upper()).execute()
+        }).eq("username", username.upper()).execute()
         return True, "密碼更新成功！"
     except Exception as e:
         return False, f"更新失敗：{str(e)}"
 
 def verify_user(username, password):
     try:
-        # 先嘗試大寫搜尋
         res = supabase.table("users").select("*").eq("username", username.upper()).execute()
-        
-        # 如果找不到，嘗試小寫搜尋（兼容直接在 Supabase 創建的用戶）
-        if not res.data:
-            res = supabase.table("users").select("*").eq("username", username.lower()).execute()
-        
-        # 如果還是找不到，嘗試原始輸入搜尋
-        if not res.data:
-            res = supabase.table("users").select("*").eq("username", username).execute()
-        
         if not res.data:
             return False, "用戶不存在"
-        
         user = res.data[0]
-        # 兼容兩種欄位名稱：password_hash 或 password
-        stored_hash = user.get("password_hash", "") or user.get("password", "")
-        
-        # 確保角色名稱正確（首字母大寫）
-        user_role = user.get("role", "Staff")
-        if user_role:
-            user_role = user_role.strip().capitalize()
-            if user_role.lower() == "admin":
-                user_role = "Admin"
-            elif user_role.lower() == "staff":
-                user_role = "Staff"
-            elif user_role.lower() == "customer":
-                user_role = "Customer"
-        
-        # 檢查密碼是否為雜湊值
-        if stored_hash.startswith('$2b$') or stored_hash.startswith('$2a$'):
-            # 是雜湊值，使用 bcrypt 驗證
-            if _verify_password(password, stored_hash):
-                return True, user_role
-            else:
-                return False, "密碼錯誤"
-        else:
-            # 是明文密碼（直接在 Supabase 創建的情況）
-            if stored_hash == password:
-                return True, user_role
-            else:
-                return False, "密碼錯誤"
+        if _verify_password(password, user.get("password_hash", "")):
+            return True, user.get("role", "Customer")
+        return False, "密碼錯誤"
     except Exception as e:
         return False, f"驗證失敗：{str(e)}"
